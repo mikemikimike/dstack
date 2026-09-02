@@ -91,6 +91,13 @@ RESERVATION_PATTERN = re.compile(
 RESOURCE_NAME_PATTERN = re.compile(r"[a-z0-9-]+")
 TPU_VERSIONS = [tpu.name for tpu in KNOWN_TPUS]
 DEFAULT_GATEWAY_INSTANCE_TYPE = "e2-medium"
+# Fractional G4 VMs expose a partial RTXPRO6000 vGPU that is not supported by
+# the dstack image and must not be advertised as a full 96 GiB GPU.
+UNSUPPORTED_FRACTIONAL_G4_INSTANCE_TYPES = {
+    "g4-standard-6",
+    "g4-standard-12",
+    "g4-standard-24",
+}
 
 
 class GCPOfferBackendData(CoreModel):
@@ -997,6 +1004,8 @@ class GCPCompute(
 
 def _is_supported_gcp_instance(instance_name: str, gpu_name: Optional[str]) -> bool:
     """Check if the instance is supported by dstack."""
+    if instance_name in UNSUPPORTED_FRACTIONAL_G4_INSTANCE_TYPES:
+        return False
     if _is_tpu(instance_name) and not _is_single_host_tpu(instance_name):
         return False
     for family in [
