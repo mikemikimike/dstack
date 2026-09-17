@@ -117,6 +117,14 @@ class RunpodCompute(
         self, requirements: Requirements
     ) -> Optional[Callable[[InstanceOfferWithAvailability], bool]]:
         def offers_post_filter(offer: InstanceOfferWithAvailability) -> bool:
+            # REST API v2 does not expose the GraphQL spot/interruptible
+            # deployment mutation, so spot offers cannot be provisioned.
+            if offer.instance.resources.spot:
+                return False
+            # Clusters accept data-center IDs but do not expose the pod-level
+            # cloud selector; only secure-cloud cluster offers are targetable.
+            if requirements.multinode and not _is_secure_cloud(offer.region):
+                return False
             pod_counts = _get_offer_pod_counts(offer)
             is_cluster_offer = len(pod_counts) > 0 and any(pc != 1 for pc in pod_counts)
             if requirements.multinode:
@@ -171,6 +179,7 @@ class RunpodCompute(
                 instance_id=instance_offer.instance.name,
                 cloud_type="SECURE",
                 deploy_cost=instance_offer.price,
+                vcpu_count=instance_offer.instance.resources.cpus,
                 data_center_id=instance_offer.region,
                 container_disk_in_gb=disk_size,
                 start_ssh=True,
@@ -287,9 +296,10 @@ class RunpodCompute(
                 f"Failed to provision {pod_count} pods. Available pod counts: {offer_pod_counts}"
             )
 
-        container_registry_auth_id = self._generate_container_registry_auth_id(
-            master_job.job_spec.registry_auth
-        )
+        if master_job.job_spec.registry_auth is not None:
+            raise ComputeError(
+                "Runpod REST API v2 does not support private registries for clusters"
+            )
         resp = self.api_client.create_cluster(
             cluster_name=pod_name,
             gpu_type_id=instance_offer.instance.name,
@@ -307,25 +317,13 @@ class RunpodCompute(
             env={"RUNPOD_POD_USER": "0"},
         )
 
-        # Unlike create mutations for individual pods, createCluster mutation doesn't accept
-        # containerRegistryAuthId.
-        # The workaround is to inject containerRegistryAuthId into already created pods.
-        # Expect a long time (~5m) for the pods to pick up the creds.
-        # TODO: remove once createCluster supports containerRegistryAuthId
-        if container_registry_auth_id is not None:
-            for pod in resp["pods"]:
-                self.api_client.update_pod_container_registry_auth(
-                    pod_id=pod["id"],
-                    container_registry_auth_id=container_registry_auth_id,
-                )
-
         jpds = [
             JobProvisioningData(
                 backend=instance_offer.backend,
                 instance_type=instance_offer.instance,
                 instance_id=pod["id"],
                 hostname=None,
-                internal_ip=pod["clusterIp"],
+                internal_ip=pod.get("clusterIp") or pod.get("cluster", {}).get("ip"),
                 region=instance_offer.region,
                 price=instance_offer.price,
                 username="root",
@@ -347,7 +345,7 @@ class RunpodCompute(
         try:
             self.api_client.terminate_pod(instance_id)
         except RunpodApiClientError as e:
-            if len(e.errors) > 0 and e.errors[0]["message"] == "pod not found to terminate":
+            if len(e.errors) > 0 and "not found" in e.errors[0]["message"].lower():
                 logger.debug("The instance %s not found. Skipping deletion.", instance_id)
                 return
             raise
@@ -357,7 +355,7 @@ class RunpodCompute(
         try:
             self.api_client.delete_cluster(provisioning_data.compute_group_id)
         except RunpodApiClientError as e:
-            if len(e.errors) > 0 and e.errors[0]["extensions"]["code"] == "Cluster not found":
+            if len(e.errors) > 0 and "not found" in e.errors[0]["message"].lower():
                 logger.debug(
                     "The cluster %s not found. Skipping deletion.",
                     provisioning_data.compute_group_id,
@@ -379,9 +377,9 @@ class RunpodCompute(
         if ports is None:
             return
         for port in pod["runtime"]["ports"]:
-            if port["privatePort"] == DSTACK_RUNNER_SSH_PORT:
+            if port["private"] == DSTACK_RUNNER_SSH_PORT:
                 provisioning_data.hostname = port["ip"]
-                provisioning_data.ssh_port = port["publicPort"]
+                provisioning_data.ssh_port = port["public"]
 
     def register_volume(self, volume: Volume) -> VolumeProvisioningData:
         assert isinstance(volume.configuration, RunpodVolumeConfiguration)
@@ -426,10 +424,7 @@ class RunpodCompute(
             try:
                 self.api_client.delete_network_volume(volume_id=volume.volume_id)
             except RunpodApiClientError as e:
-                if (
-                    len(e.errors) > 0
-                    and "Tried to delete nonexistent network volume" in e.errors[0]["message"]
-                ):
+                if len(e.errors) > 0 and "not found" in e.errors[0]["message"].lower():
                     logger.debug(
                         "The volume %s not found. Skipping deletion.",
                         volume.volume_id,
