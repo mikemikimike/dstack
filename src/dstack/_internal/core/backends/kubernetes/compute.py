@@ -1526,6 +1526,7 @@ def _create_job_pod(
                 )
             ],
             restart_policy=RestartPolicy.NEVER,
+            termination_grace_period_seconds=0,
             image_pull_secrets=(
                 [client.V1LocalObjectReference(name=registry_auth_secret_name)]
                 if registry_auth_secret_name is not None

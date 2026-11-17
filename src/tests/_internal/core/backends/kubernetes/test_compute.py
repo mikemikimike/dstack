@@ -14,6 +14,7 @@ from dstack._internal.core.backends.kubernetes.compute import (
     JUMP_POD_EPHEMERAL_STORAGE_REQUEST,
     KubernetesCompute,
     _check_and_configure_jump_pod_service,
+    _create_job_pod,
     _create_jump_pod_service_if_not_exists,
     _get_pod_spec_parameters_for_gpu,
     _KubernetesSkipOfferCache,
@@ -36,7 +37,7 @@ from dstack._internal.core.models.instances import (
     SSHConnectionParams,
 )
 from dstack._internal.core.models.resources import GPUSpec, ResourcesSpec
-from dstack._internal.core.models.runs import Requirements
+from dstack._internal.core.models.runs import JobSpec, Requirements, RunSpec
 
 
 def _compute() -> KubernetesCompute:
@@ -69,6 +70,40 @@ def _node_offer() -> InstanceOfferWithAvailability:
         price=0.0,
         availability=InstanceAvailability.AVAILABLE,
     )
+
+
+@pytest.mark.windows
+def test_create_job_pod_uses_zero_termination_grace_period():
+    requirements = Requirements(
+        resources=ResourcesSpec.model_validate({"cpu": "2", "memory": "8GB"})
+    )
+    job_spec = JobSpec(
+        job_num=0,
+        job_name="test",
+        commands=[],
+        env={},
+        image_name="example/image:latest",
+        requirements=requirements,
+        volumes=[],
+    )
+    api = Mock()
+
+    _create_job_pod(
+        api=api,
+        namespace="dstack",
+        labels={},
+        pod_name="test-pod",
+        registry_auth_secret_name=None,
+        run_spec=RunSpec.model_construct(),
+        job_spec=job_spec,
+        volumes=[],
+        requirements=requirements,
+        mig_resource=None,
+        authorized_keys=[],
+    )
+
+    pod = api.create_namespaced_pod.call_args.kwargs["body"]
+    assert pod.spec.termination_grace_period_seconds == 0
 
 
 def test_get_offers_modifiers_are_skipped_with_full_offers():
